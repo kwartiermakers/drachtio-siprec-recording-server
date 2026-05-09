@@ -36,22 +36,40 @@ if (config.has('rtpengine')) {
 
   // Defense-in-depth source-IP allowlist on top of the GCP firewall.
   // Empty list = unset = accept-all (dev-friendly); production envs MUST
-  // set SIPREC_ALLOWED_SOURCES to the same CIDR list as the firewall rule.
+  // set SIPREC_ALLOWED_SOURCES to the same external-source CIDR list as
+  // the firewall rule.
+  //
+  // RFC1918 / loopback sources (own opensips proxy forking SIPREC over
+  // VPC, sidecar processes, etc.) are always allowed. The boundary the
+  // allowlist defends is the public network — once a packet has crossed
+  // GCP's VPC perimeter it has already passed both the firewall and
+  // private-network gating, so re-checking it here would just block our
+  // own traffic.
   const ALLOWED_SOURCES = (process.env.SIPREC_ALLOWED_SOURCES || '')
     .split(',')
     .map((s) => s.trim().replace(/\/32$/, ''))
     .filter(Boolean);
 
   if (ALLOWED_SOURCES.length === 0) {
-    logger.warn('SIPREC_ALLOWED_SOURCES is unset — recorder will accept INVITEs from any source IP');
+    logger.warn('SIPREC_ALLOWED_SOURCES is unset — recorder will accept INVITEs from any public source IP');
   }
   else {
-    logger.info({allowed: ALLOWED_SOURCES}, 'SIPREC source-IP allowlist active');
+    logger.info({allowed: ALLOWED_SOURCES}, 'SIPREC source-IP allowlist active for public sources');
+  }
+
+  function isPrivateIp(ip) {
+    if (!ip) return false;
+    if (ip === '::1' || ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return true;
+    if (ip.startsWith('127.') || ip.startsWith('10.') || ip.startsWith('192.168.')) return true;
+    const m = ip.match(/^172\.(\d+)\./);
+    if (m && +m[1] >= 16 && +m[1] <= 31) return true;
+    return false;
   }
 
   srf.use('invite', (req, res, next) => {
-    if (ALLOWED_SOURCES.length === 0) return next();
     const src = req.source_address;
+    if (isPrivateIp(src)) return next();
+    if (ALLOWED_SOURCES.length === 0) return next();
     if (!ALLOWED_SOURCES.includes(src)) {
       logger.warn(`rejecting INVITE from ${src} (call-id ${req.get('Call-ID')}): not in SIPREC allowlist`);
       return res.send(403, 'Source IP not in SIPREC allowlist');
