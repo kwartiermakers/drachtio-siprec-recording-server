@@ -34,6 +34,31 @@ if (config.has('rtpengine')) {
     next();
   });
 
+  // Defense-in-depth source-IP allowlist on top of the GCP firewall.
+  // Empty list = unset = accept-all (dev-friendly); production envs MUST
+  // set SIPREC_ALLOWED_SOURCES to the same CIDR list as the firewall rule.
+  const ALLOWED_SOURCES = (process.env.SIPREC_ALLOWED_SOURCES || '')
+    .split(',')
+    .map((s) => s.trim().replace(/\/32$/, ''))
+    .filter(Boolean);
+
+  if (ALLOWED_SOURCES.length === 0) {
+    logger.warn('SIPREC_ALLOWED_SOURCES is unset — recorder will accept INVITEs from any source IP');
+  }
+  else {
+    logger.info({allowed: ALLOWED_SOURCES}, 'SIPREC source-IP allowlist active');
+  }
+
+  srf.use('invite', (req, res, next) => {
+    if (ALLOWED_SOURCES.length === 0) return next();
+    const src = req.source_address;
+    if (!ALLOWED_SOURCES.includes(src)) {
+      logger.warn(`rejecting INVITE from ${src} (call-id ${req.get('Call-ID')}): not in SIPREC allowlist`);
+      return res.send(403, 'Source IP not in SIPREC allowlist');
+    }
+    next();
+  });
+
 }
 else if (config.has('freeswitch')) {
   logger.info(config.get('freeswitch'), 'using freeswitch as the recorder');
